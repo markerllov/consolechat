@@ -7,6 +7,9 @@ from Crypto.Hash import HMAC, SHA256
 from Crypto.Util.Padding import pad, unpad
 import base64
 
+from telethon import password
+
+
 class ChatClient:
     def __init__(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -147,10 +150,9 @@ class ChatClient:
 
                 if not self.current_user:
                     if choice == '1':
-                        target = input("Recipient ID: ").strip()
-                        msg = input("Message: ").strip()
-                        encrypted_msg = self.encrypt_message(msg)
-                        self.send_command(f"send|{target}|{encrypted_msg}")
+                        user = input("Username: ").strip()
+                        password = input("Password: ").strip()
+                        self.send_command("register", user, password)
                     elif choice == '2':
                         user = input("Username: ").strip()
                         pwd = input("Password: ").strip()
@@ -162,9 +164,9 @@ class ChatClient:
                         print("Invalid choice")
                 else:
                     if choice == '1':
-                        target = input("Recipient ID: ").strip()
-                        msg = input("Message: ").strip()
-                        self.send_command(f"send|{target}|{msg}")
+                        user = input("Username: ").strip()
+                        password = input("Password: ").strip()
+                        self.send_command("register", user, password)
                     elif choice == '2':
                         self.send_command("list")
                     elif choice == '3':
