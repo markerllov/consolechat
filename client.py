@@ -2,6 +2,10 @@ import socket
 import threading
 import json
 import sys
+from Crypto.Cipher import AES
+from Crypto.Hash import HMAC, SHA256
+from Crypto.Util.Padding import pad, unpad
+import base64
 
 class ChatClient:
     def __init__(self):
@@ -9,6 +13,7 @@ class ChatClient:
         self.current_user = None
         self.device_id = None
         self.running = True
+        self.shared_secret = b'secure_secret_key_32bytes_256bits!'
 
     def connect(self, host, port):
         try:
@@ -43,6 +48,35 @@ class ChatClient:
                 self.running = False
                 break
 
+    def encrypt_message(self, message):
+        try:
+            iv = get_random_bytes(16)
+            cipher = AES.new(self.shared_secret, AES.MODE_CBC, iv)
+            padded_msg = pad(message.encode('utf-8'), AES.block_size)
+            encrypted = cipher.encrypt(padded_msg)
+            hmac = HMAC.new(self.shared_secret, iv + encrypted, digestmod=SHA256)
+            mac = hmac.digest()
+            return base64.b64encode(iv + mac + encrypted).decode('utf-8')
+        except Exception as e:
+            print(f"Encryption error: {e}")
+            return None
+
+    def decrypt_message(self, encrypted_msg):
+        try:
+            raw = base64.b64decode(encrypted_msg)
+            iv, mac, encrypted = raw[:16], raw[16:48], raw[48:]
+
+            # Проверка целостности
+            hmac = HMAC.new(self.shared_secret, iv + encrypted, digestmod=SHA256)
+            hmac.verify(mac)
+
+            cipher = AES.new(self.shared_secret, AES.MODE_CBC, iv)
+            decrypted = unpad(cipher.decrypt(encrypted), AES.block_size)
+            return decrypted.decode('utf-8')
+        except (ValueError, KeyError, Exception) as e:
+            print(f"Decryption failed: {e}")
+            return None
+
     def handle_server_message(self, message):
         if not message:
             return
@@ -70,10 +104,15 @@ class ChatClient:
                     print(f"{username} (ID: {device_id})")
             except:
                 print("\nFailed to load online users")
+
         elif status == "MESSAGE":
             sender = content
-            message = parts[2] if len(parts) > 2 else ""
-            print(f"\nNew message from {sender}: {message}")
+            encrypted_msg = parts[2] if len(parts) > 2 else ""
+            decrypted = self.decrypt_message(encrypted_msg)
+            if decrypted:
+                print(f"\nNew message from {sender}: {decrypted}")
+            else:
+                print("\nReceived corrupted message")
 
         self.show_menu()
 
@@ -92,7 +131,7 @@ class ChatClient:
         if not self.current_user:
             print("\n1. Register\n2. Login\n3. Exit")
         else:
-            print("\n1. Send message\n2. List users\n3. Logout")
+            print("\n1. Send message\n2. List users\n3. Profile\n4. Logout")
         print("> ", end="", flush=True)
 
     def run(self):
@@ -108,9 +147,10 @@ class ChatClient:
 
                 if not self.current_user:
                     if choice == '1':
-                        user = input("Username: ").strip()
-                        pwd = input("Password: ").strip()
-                        self.send_command("register", user, pwd)
+                        target = input("Recipient ID: ").strip()
+                        msg = input("Message: ").strip()
+                        encrypted_msg = self.encrypt_message(msg)
+                        self.send_command(f"send|{target}|{encrypted_msg}")
                     elif choice == '2':
                         user = input("Username: ").strip()
                         pwd = input("Password: ").strip()
@@ -128,6 +168,8 @@ class ChatClient:
                     elif choice == '2':
                         self.send_command("list")
                     elif choice == '3':
+                        self.send_command("profile")
+                    elif choice == '4':
                         self.current_user = None
                         self.send_command("logout")
                     else:

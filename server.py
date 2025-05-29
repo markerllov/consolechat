@@ -4,6 +4,10 @@ import json
 import os
 import uuid
 from datetime import datetime
+from Crypto.Cipher import AES
+from Crypto.Hash import HMAC, SHA256
+from Crypto.Util.Padding import pad, unpad
+import base64
 
 
 class ChatServer:
@@ -15,6 +19,7 @@ class ChatServer:
         self.server_socket = None
         self.online_users = {}  # Format: {device_id: (username, client_socket)}
         self.running = True
+        self.shared_secret = b'secure_secret_key_32bytes_256bits!'
 
     def setup_files(self):
         if not os.path.exists(self.users_file):
@@ -31,6 +36,35 @@ class ChatServer:
     def save_users(self, users):
         with open(self.users_file, 'w') as f:
             json.dump(users, f, indent=4)
+
+    def encrypt_message(self, message):
+        try:
+            iv = get_random_bytes(16)
+            cipher = AES.new(self.shared_secret, AES.MODE_CBC, iv)
+            padded_msg = pad(message.encode('utf-8'), AES.block_size)
+            encrypted = cipher.encrypt(padded_msg)
+            hmac = HMAC.new(self.shared_secret, iv + encrypted, digestmod=SHA256)
+            mac = hmac.digest()
+            return base64.b64encode(iv + mac + encrypted).decode('utf-8')
+        except Exception as e:
+            print(f"Encryption error: {e}")
+            return None
+
+    def decrypt_message(self, encrypted_msg):
+        try:
+            raw = base64.b64decode(encrypted_msg)
+            iv, mac, encrypted = raw[:16], raw[16:48], raw[48:]
+
+            # Проверка целостности
+            hmac = HMAC.new(self.shared_secret, iv + encrypted, digestmod=SHA256)
+            hmac.verify(mac)
+
+            cipher = AES.new(self.shared_secret, AES.MODE_CBC, iv)
+            decrypted = unpad(cipher.decrypt(encrypted), AES.block_size)
+            return decrypted.decode('utf-8')
+        except (ValueError, KeyError, Exception) as e:
+            print(f"Decryption failed: {e}")
+            return None
 
     def handle_client(self, client, address):
         print(f"New connection from {address}")
@@ -87,20 +121,45 @@ class ChatServer:
                         online_list = {did: username for did, (username, _) in self.online_users.items()}
                         response = "ONLINE|" + json.dumps(online_list)
 
+                    elif command == 'profile':
+                        print(f'Name: {username}\nID: {device_id}')
+                        response = "PROFILE|" + json.dumps(users)
+
+
+
                     elif command == 'send':
+
                         if len(parts) < 3:
                             continue
-                        target_id = parts[1]
-                        message = parts[2]
 
-                        if target_id in self.online_users:
+                        target_id = parts[1]
+
+                        encrypted_msg = parts[2]
+
+                        # Расшифровываем для проверки перед пересылкой
+
+                        decrypted = self.decrypt_message(encrypted_msg)
+
+                        if decrypted is None:
+
+                            response = "ERROR|Invalid message"
+
+                        elif target_id in self.online_users:
+
                             recipient = self.online_users[target_id][1]
+
                             try:
-                                recipient.sendall(f"MESSAGE|{current_user}|{message}\n".encode('utf-8'))
+
+                                recipient.sendall(f"MESSAGE|{current_user}|{encrypted_msg}\n".encode('utf-8'))
+
                                 response = "SUCCESS|Message sent"
+
                             except:
+
                                 response = "ERROR|Failed to send message"
+
                         else:
+
                             response = "ERROR|User not online"
 
                     elif command == 'logout':
