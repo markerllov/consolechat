@@ -1,8 +1,7 @@
 import socket
 import threading
 import json
-from security import SimpleCipher
-
+import sys
 
 class ChatClient:
     def __init__(self):
@@ -10,8 +9,6 @@ class ChatClient:
         self.current_user = None
         self.device_id = None
         self.running = True
-        self.cipher = SimpleCipher()
-        self.encryption_key = "secret_chat_key_123"  # Должен совпадать с серверным
 
     def connect(self, host, port):
         try:
@@ -23,17 +20,19 @@ class ChatClient:
             return False
 
     def receive_messages(self):
+        buffer = ""
         while self.running:
             try:
-                encrypted_data = self.socket.recv(1024).decode('utf-8')
-                if not encrypted_data:
+                data = self.socket.recv(1024).decode('utf-8')
+                if not data:
                     print("\nServer closed the connection")
                     self.running = False
                     break
 
-                # Дешифруем сообщение
-                message = self.cipher.decrypt(encrypted_data, self.encryption_key)
-                self.handle_server_message(message)
+                buffer += data
+                while "\n" in buffer:
+                    message, buffer = buffer.split("\n", 1)
+                    self.handle_server_message(message.strip())
 
             except ConnectionResetError:
                 print("\nConnection lost with server")
@@ -45,52 +44,46 @@ class ChatClient:
                 break
 
     def handle_server_message(self, message):
+        if not message:
+            return
+
         parts = message.split('|', 2)
+        if len(parts) < 2:
+            return
+
         status = parts[0]
+        content = parts[1]
 
         if status == "ERROR":
-            print(f"\nError: {parts[1]}")
+            print(f"\nError: {content}")
         elif status == "SUCCESS":
-            print(f"\nSuccess: {parts[1]}")
-            if "Registered" in parts[1] or "Logged in" in parts[1]:
+            print(f"\nSuccess: {content}")
+            if "Registered" in content or "Logged in" in content:
                 self.device_id = parts[2] if len(parts) > 2 else None
-                if "Logged in" in parts[1]:
+                if "Logged in" in content:
                     self.current_user = True
         elif status == "ONLINE":
             try:
-                users = json.loads(parts[1])
+                users = json.loads(content)
                 print("\nOnline users:")
                 for device_id, username in users.items():
                     print(f"{username} (ID: {device_id})")
             except:
                 print("\nFailed to load online users")
         elif status == "MESSAGE":
-            sender = parts[1]
-            msg = parts[2] if len(parts) > 2 else ""
-            print(f"\nNew message from {sender}: {msg}")
-        elif status == "HISTORY":
-            try:
-                history = json.loads(parts[1])
-                print("\nMessage history:")
-                for msg in history:
-                    direction = "to" if msg['sender'] == self.current_user else "from"
-                    other_user = msg['recipient'] if direction == "to" else msg['sender']
-                    print(f"[{msg['timestamp']}] {direction} {other_user}: {msg['message']}")
-            except:
-                print("\nFailed to load history")
+            sender = content
+            message = parts[2] if len(parts) > 2 else ""
+            print(f"\nNew message from {sender}: {message}")
 
         self.show_menu()
 
     def send_command(self, command, username=None, password=None):
         try:
             if username and password:
-                message = f"{command}|{username}|{password}"
+                message = f"{command}|{username}|{password}\n"
             else:
-                message = command
-
-            # Шифруем команду перед отправкой
-            encrypted = self.cipher.encrypt(message, self.encryption_key)
-            self.socket.sendall(encrypted.encode('utf-8'))
+                message = f"{command}\n"
+            self.socket.sendall(message.encode('utf-8'))
         except Exception as e:
             print(f"Send error: {e}")
             self.running = False
@@ -99,7 +92,7 @@ class ChatClient:
         if not self.current_user:
             print("\n1. Register\n2. Login\n3. Exit")
         else:
-            print("\n1. Send message\n2. List users\n3. View history\n4. Logout")
+            print("\n1. Send message\n2. List users\n3. Logout")
         print("> ", end="", flush=True)
 
     def run(self):
@@ -135,9 +128,6 @@ class ChatClient:
                     elif choice == '2':
                         self.send_command("list")
                     elif choice == '3':
-                        target = input("Filter by user ID (leave empty for all): ").strip()
-                        self.send_command(f"get_history|{target}" if target else "get_history")
-                    elif choice == '4':
                         self.current_user = None
                         self.send_command("logout")
                     else:
@@ -156,7 +146,6 @@ class ChatClient:
 
         self.socket.close()
         print("Goodbye!")
-
 
 if __name__ == "__main__":
     client = ChatClient()
