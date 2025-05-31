@@ -2,10 +2,10 @@ import socket
 import threading
 import json
 import os
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 from datetime import datetime
-from security import SimpleCipher
 
 
 class ChatClientGUI:
@@ -23,8 +23,8 @@ class ChatClientGUI:
         self.server_host = "localhost"
         self.receiving_file = None
         self.receiving_filename = None
-        self.chiper = SimpleCipher()
-        self.encryption_key = "secret_key"
+        self.file_receiving = False
+        self.file_transfer_accepted = False
 
         # Создаем интерфейс
         self.create_login_frame()
@@ -163,7 +163,10 @@ class ChatClientGUI:
                     self.running = False
                     break
 
-                message = self.chiper.decrypt(data, self.encryption_key)
+                buffer += data
+                while "\n" in buffer:
+                    message, buffer = buffer.split("\n", 1)
+                    self.handle_server_message(message.strip())
 
             except ConnectionResetError:
                 self.show_error("Соединение с сервером потеряно")
@@ -215,10 +218,12 @@ class ChatClientGUI:
             self.start_receiving_file(filename)
         elif status == "FILE_END":
             self.finish_receiving_file()
-        elif status == "FILE_INIT":
+        elif status == "FILE_ACCEPT":
             filename = content
-            filesize = parts[2] if len(parts) > 2 else 0
-            self.init_file_transfer(filename, filesize)
+            self.file_transfer_accepted = True
+            self.display_message("Система", f"Получатель принял файл {filename}", system=True)
+        elif status == "FILE_REJECT":
+            self.display_message("Система", "Получатель отклонил передачу файла", system=True)
 
     def update_users_list(self, users):
         """Обновление списка пользователей"""
@@ -237,10 +242,8 @@ class ChatClientGUI:
             if username and password:
                 message = f"{command}|{username}|{password}\n"
             else:
-                message = command
-
-            encrypted = self.chiper.encrypt(message, self.encryption_key)
-            self.socket.sendall(encrypted.encode('utf-8'))
+                message = f"{command}\n"
+            self.socket.sendall(message.encode('utf-8'))
         except Exception as e:
             self.show_error(f"Ошибка отправки: {e}")
             self.running = False
@@ -255,7 +258,7 @@ class ChatClientGUI:
             self.show_error("Введите имя пользователя и пароль")
             return
 
-        if not self.connect(host, 5555):
+        if not self.connect(host, 6666):
             return
 
         self.send_command("login", username, password)
@@ -270,7 +273,7 @@ class ChatClientGUI:
             self.show_error("Введите имя пользователя и пароль")
             return
 
-        if not self.connect(host, 5555):
+        if not self.connect(host, 6666):
             return
 
         self.send_command("register", username, password)
@@ -308,21 +311,44 @@ class ChatClientGUI:
             self.show_error("Выберите получателя")
             return
 
-        recipient_id = self.users_tree.item(selected[0])['values'][0]
         filename = filedialog.askopenfilename(title="Выберите файл для отправки")
+        if not filename:
+            return
 
-        if filename:
-            self.send_command(f"sendfile|{recipient_id}|{filename}")
+        recipient_id = self.users_tree.item(selected[0])['values'][0]
+        
+        # Проверяем существование файла
+        if not os.path.exists(filename):
+            self.show_error("Файл не найден")
+            return
+            
+        # Отправляем запрос на передачу файла
+        self.send_command(f"sendfile|{recipient_id}|{os.path.basename(filename)}")
+        
+        # Инициируем передачу файла после подтверждения
+        threading.Thread(
+            target=self.send_file,
+            args=(filename, recipient_id),
+            daemon=True
+        ).start()
 
-    def send_file(self, filename):
+    def send_file(self, filename, recipient_id):
         """Отправка файла"""
         try:
+            # Ждем подтверждения от сервера
+            start_time = time.time()
+            while not self.file_transfer_accepted:
+                if time.time() - start_time > 10:  # Таймаут 10 секунд
+                    self.display_message("Система", "Таймаут ожидания подтверждения передачи файла", system=True)
+                    return
+                time.sleep(0.1)
+
             # Устанавливаем соединение для передачи файла
             self.file_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.file_socket.connect((self.server_host, 5556))
 
             # Отправляем метаданные
-            metadata = f"DATA|{self.device_id}|{self.device_id}|{os.path.basename(filename)}"
+            metadata = f"DATA|{self.device_id}|{recipient_id}|{os.path.basename(filename)}"
             self.file_socket.sendall(metadata.encode('utf-8'))
 
             # Отправляем файл
@@ -333,11 +359,12 @@ class ChatClientGUI:
                         break
                     self.file_socket.sendall(data)
 
-            self.show_info(f"Файл {os.path.basename(filename)} отправлен успешно!")
+            self.display_message("Система", f"Файл {os.path.basename(filename)} отправлен успешно!", system=True)
 
         except Exception as e:
             self.show_error(f"Ошибка отправки файла: {e}")
         finally:
+            self.file_transfer_accepted = False
             if self.file_socket:
                 self.file_socket.close()
 
@@ -357,23 +384,28 @@ class ChatClientGUI:
         """Начало приема файла"""
         self.receiving_filename = filename
         try:
-            self.receiving_file = open(filename, 'wb')
+            # Создаем папку downloads, если ее нет
+            if not os.path.exists("downloads"):
+                os.makedirs("downloads")
+            
+            # Сохраняем файл в папку downloads
+            save_path = os.path.join("downloads", os.path.basename(filename))
+            self.receiving_file = open(save_path, 'wb')
+            self.file_receiving = True
             self.display_message("Система", f"Начало приема файла: {filename}", system=True)
         except Exception as e:
             self.show_error(f"Ошибка создания файла: {e}")
             self.receiving_filename = None
+            self.file_receiving = False
 
     def finish_receiving_file(self):
         """Завершение приема файла"""
         if self.receiving_file:
             self.receiving_file.close()
             self.receiving_file = None
+            self.file_receiving = False
             self.display_message("Система", f"Файл {self.receiving_filename} получен успешно!", system=True)
             self.receiving_filename = None
-
-    def init_file_transfer(self, filename, filesize):
-        """Инициализация передачи файла"""
-        self.send_file(filename)
 
     def display_message(self, sender, message, outgoing=False, system=False):
         """Отображение сообщения в чате"""

@@ -4,13 +4,12 @@ import json
 import os
 import uuid
 from datetime import datetime
-from security import SimpleCipher
 
 
 class ChatServer:
     def __init__(self):
         self.host = '0.0.0.0'
-        self.port = 5555
+        self.port = 6666
         self.file_port = 5556
         self.users_file = 'users.json'
         self.setup_files()
@@ -18,8 +17,6 @@ class ChatServer:
         self.file_socket = None
         self.online_users = {}  # {device_id: (username, client_socket)}
         self.running = True
-        self.chiper = SimpleCipher()
-        self.encryption_key = "secret_key"
         self.file_transfers = {}  # Для отслеживания передач файлов
 
     def setup_files(self):
@@ -101,7 +98,7 @@ class ChatServer:
                         recipient_socket.sendall(data)
 
                     recipient_socket.sendall(
-                        f"FILE_END|{filename}\n".encode('utf-8')
+                        f"FILE_END\n".encode('utf-8')
                     )
 
         except Exception as e:
@@ -120,8 +117,6 @@ class ChatServer:
                     data = client.recv(1024).decode('utf-8').strip()
                     if not data:
                         break
-
-                    decrypted_data = self.chiper.decrypt(data, self.encryption_key)
 
                     parts = data.split('|')
                     if len(parts) < 1:
@@ -175,7 +170,6 @@ class ChatServer:
                         if target_id in self.online_users:
                             recipient = self.online_users[target_id][1]
                             try:
-                                encrypted_response = self.chiper.encrypt(response, self.encryption_key)
                                 recipient.sendall(f"MESSAGE|{current_user}|{message}\n".encode('utf-8'))
                                 response = "SUCCESS|Message sent"
                             except:
@@ -189,14 +183,15 @@ class ChatServer:
                         target_id = parts[1]
                         filename = parts[2]
 
-                        if not os.path.exists(filename):
-                            response = "ERROR|File not found"
-                        elif target_id not in self.online_users:
+                        if target_id not in self.online_users:
                             response = "ERROR|User not online"
                         else:
-                            filesize = os.path.getsize(filename)
-                            response = f"FILE_INIT|{filename}|{filesize}"
+                            # Сохраняем информацию о передаче
                             self.file_transfers[(device_id, target_id)] = filename
+                            # Отправляем запрос получателю
+                            recipient_socket = self.online_users[target_id][1]
+                            recipient_socket.sendall(f"FILE_REQUEST|{device_id}|{os.path.basename(filename)}\n".encode('utf-8'))
+                            response = "SUCCESS|File request sent"
 
                     elif command == 'acceptfile':
                         if len(parts) < 2:
@@ -205,7 +200,25 @@ class ChatServer:
 
                         if (sender_id, device_id) in self.file_transfers:
                             filename = self.file_transfers[(sender_id, device_id)]
-                            response = f"FILE_ACCEPT|{filename}"
+                            # Уведомляем отправителя о принятии файла
+                            if sender_id in self.online_users:
+                                sender_socket = self.online_users[sender_id][1]
+                                sender_socket.sendall(f"FILE_ACCEPT|{filename}\n".encode('utf-8'))
+                            response = "SUCCESS|File transfer accepted"
+                        else:
+                            response = "ERROR|No file transfer request"
+
+                    elif command == 'rejectfile':
+                        if len(parts) < 2:
+                            continue
+                        sender_id = parts[1]
+
+                        if (sender_id, device_id) in self.file_transfers:
+                            del self.file_transfers[(sender_id, device_id)]
+                            if sender_id in self.online_users:
+                                sender_socket = self.online_users[sender_id][1]
+                                sender_socket.sendall("FILE_REJECT\n".encode('utf-8'))
+                            response = "SUCCESS|File transfer rejected"
                         else:
                             response = "ERROR|No file transfer request"
 
@@ -213,8 +226,7 @@ class ChatServer:
                         if device_id in self.online_users:
                             del self.online_users[device_id]
                         response = "SUCCESS|Logged out"
-                        encrypted_response = self.chiper.encrypt(response, self.encryption_key)
-                        client.sendall((encrypted_response + "\n").encode('utf-8'))
+                        client.sendall((response + "\n").encode('utf-8'))
                         break
 
                     else:
